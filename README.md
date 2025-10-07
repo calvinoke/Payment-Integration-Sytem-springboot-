@@ -102,4 +102,8 @@ Replace <your-org> and placeholder environment variables with your actual values
 
 Add payment-provider–specific setup instructions (e.g., Stripe webhook secrets, PayPal sandbox).
 
+
 If you maintain both backend and frontend, include instructions for running the frontend client.
+
+If you maintain both backend and frontend, include instructions for running the frontend client.
+
