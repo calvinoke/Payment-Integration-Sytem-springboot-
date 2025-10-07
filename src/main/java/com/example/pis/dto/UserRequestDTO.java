@@ -1,8 +1,9 @@
 package com.example.pis.dto;
 
+import com.example.pis.entity.Role;
+
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 /**
@@ -33,17 +34,15 @@ public class UserRequestDTO {
     private String email;
 
     /** Role of the user, defaults to USER if not provided */
-    @NotBlank(message = "Role is required")
-    @Pattern(regexp = "USER|ADMIN", message = "Role must be USER or ADMIN")
-    private String role = "USER";
+    private Role role = Role.USER;
 
     public UserRequestDTO() {}
 
-    public UserRequestDTO(String username, String password, String email, String role) {
+    public UserRequestDTO(String username, String password, String email, Role role) {
         this.username = username;
         this.password = password;
         this.email = email;
-        this.role = (role == null || role.isBlank()) ? "USER" : role;
+        this.role = (role == null) ? Role.USER : role;
     }
 
     public String getUsername() { return username; }
@@ -55,9 +54,9 @@ public class UserRequestDTO {
     public String getEmail() { return email; }
     public void setEmail(String email) { this.email = email; }
 
-    public String getRole() { return role; }
-    public void setRole(String role) {
-        this.role = (role == null || role.isBlank()) ? "USER" : role;
+    public Role getRole() { return role; }
+    public void setRole(Role role) {
+        this.role = (role == null) ? Role.USER : role;
     }
 
     @Override
@@ -65,7 +64,7 @@ public class UserRequestDTO {
         return "UserRequestDTO{" +
                "username='" + username + '\'' +
                ", email='" + email + '\'' +
-               ", role='" + role + '\'' +
+               ", role=" + role +
                '}';
         // password intentionally omitted
     }

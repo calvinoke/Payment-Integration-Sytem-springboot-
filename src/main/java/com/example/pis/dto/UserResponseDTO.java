@@ -2,6 +2,8 @@ package com.example.pis.dto;
 
 import java.io.Serializable;
 
+import com.example.pis.entity.Role;
+
 /**
  * DTO returned after user registration or login.
  * For login, `token` will contain the JWT.
@@ -12,21 +14,21 @@ public final class UserResponseDTO implements Serializable {
 
     private final String message;   // Info or status message
     private final String username;  // Username
-    private final String role;      // User role
+    private final Role role;        // User role (enum)
     private final String token;     // JWT token (null for register)
 
     /**
      * Full constructor.
      */
-    public UserResponseDTO(String message, String username, String role, String token) {
+    public UserResponseDTO(String message, String username, Role role, String token) {
         if (message == null || message.isBlank()) {
             throw new IllegalArgumentException("Message cannot be null or blank");
         }
         if (username == null || username.isBlank()) {
             throw new IllegalArgumentException("Username cannot be null or blank");
         }
-        if (role == null || role.isBlank()) {
-            throw new IllegalArgumentException("Role cannot be null or blank");
+        if (role == null) {
+            throw new IllegalArgumentException("Role cannot be null");
         }
         this.message = message;
         this.username = username;
@@ -35,13 +37,13 @@ public final class UserResponseDTO implements Serializable {
     }
 
     /** Convenience constructor for registration (no token) */
-    public UserResponseDTO(String message, String username, String role) {
+    public UserResponseDTO(String message, String username, Role role) {
         this(message, username, role, null);
     }
 
     public String getMessage()  { return message; }
     public String getUsername() { return username; }
-    public String getRole()     { return role; }
+    public Role getRole()       { return role; }
     public String getToken()    { return token; }
 
     @Override
@@ -49,7 +51,7 @@ public final class UserResponseDTO implements Serializable {
         return "UserResponseDTO{" +
                 "message='" + message + '\'' +
                 ", username='" + username + '\'' +
-                ", role='" + role + '\'' +
+                ", role=" + role +
                 ", token='" + token + '\'' +
                 '}';
     }

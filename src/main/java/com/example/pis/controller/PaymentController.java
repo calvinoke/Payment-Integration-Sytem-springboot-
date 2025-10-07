@@ -23,6 +23,8 @@ import com.example.pis.dto.AirtelResponseDTO;
 import com.example.pis.dto.MomoCollectRequest;
 import com.example.pis.dto.MtnResponseDTO;
 import com.example.pis.entity.PaymentTransaction;
+import com.example.pis.enums.SupportedCurrency;
+import com.example.pis.exception.PaymentProcessingException;
 import com.example.pis.repository.PaymentTransactionRepository;
 import com.example.pis.service.AirtelService;
 import com.example.pis.service.MtnService;
@@ -57,11 +59,6 @@ public class PaymentController {
         this.txRepo = txRepo;
     }
 
-    /* ---------- Test-only setter ---------- */
-    void setConfiguredApiKey(String apiKey) {
-        this.configuredApiKey = apiKey;
-    }
-
     /* ---------- Helpers ---------- */
     private boolean isAuthorized(String apiKey) {
         return StringUtils.hasText(apiKey) && apiKey.equals(configuredApiKey);
@@ -74,269 +71,253 @@ public class PaymentController {
         return phone.substring(0, keep) + "..." + phone.substring(len - 1);
     }
 
-    /* ---------- Stripe ---------- */
+    private String validateCurrency(String currency) {
+        if (currency == null || currency.isBlank()) return "USD";
+        String code = currency.toUpperCase();
+        if (!SupportedCurrency.CODES.contains(code)) {
+            throw new IllegalArgumentException("Unsupported currency: " + currency);
+        }
+        return code;
+    }
+
+    private Optional<PaymentTransaction> findExisting(String reference) {
+        return StringUtils.hasText(reference) ? txRepo.findByReference(reference) : Optional.empty();
+    }
+
+    private PaymentTransaction startTransaction(String provider, MomoCollectRequest req, String currency) {
+        PaymentTransaction tx = new PaymentTransaction();
+        tx.setProvider(provider);
+        tx.setAmount(req.amount());
+        tx.setCurrency(currency);
+        tx.setReference(StringUtils.hasText(req.reference()) ? req.reference() : UUID.randomUUID().toString());
+        tx.setStatus("PENDING");
+        tx.setCreatedAt(Instant.now());
+        txRepo.save(tx);
+        return tx;
+    }
+
+    private void failTransaction(PaymentTransaction tx, String message, RuntimeException ex) {
+        tx.markFailed();
+        txRepo.save(tx);
+        log.error("{}: ref={}, {}", message, tx.getReference(), ex.getMessage(), ex);
+    }
+
+    /* ============================================================== 
+       STRIPE ENDPOINTS (multi-currency) 
+       ============================================================== */
+
     @PostMapping("/stripe/create-payment-intent")
     @Transactional
     public ResponseEntity<?> createStripeIntent(
             @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
             @Valid @RequestBody MomoCollectRequest req
     ) {
-        if (!isAuthorized(apiKey)) {
+        if (!isAuthorized(apiKey))
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
+
+        Optional<PaymentTransaction> existing = findExisting(req.reference());
+        if (existing.isPresent()) {
+            log.info("Stripe intent exists: {}", req.reference());
+            return ResponseEntity.ok(Map.of(
+                    "clientSecret", existing.get().getClientSecret(),
+                    "reference", existing.get().getReference(),
+                    "status", existing.get().getStatus()
+            ));
         }
 
-        if (StringUtils.hasText(req.reference())) {
-            Optional<PaymentTransaction> existing = txRepo.findByReference(req.reference());
-            if (existing.isPresent()) {
-                log.info("Stripe intent exists: {}", req.reference());
-                return ResponseEntity.ok(Map.of(
-                        "clientSecret", existing.get().getClientSecret(),
-                        "reference", existing.get().getReference(),
-                        "status", existing.get().getStatus()
-                ));
-            }
+        String currency = validateCurrency(req.currency());
+        try {
+            String clientSecret = stripeService.createPaymentIntent(req.amount(), currency, req.reference());
+            PaymentTransaction tx = startTransaction("stripe", req, currency);
+            tx.setClientSecret(clientSecret);
+            tx.markInitiated();
+            txRepo.save(tx);
+
+            log.info("Stripe intent created: ref={}, amount={}, currency={}", tx.getReference(), req.amount(), currency);
+            return ResponseEntity.ok(Map.of("clientSecret", clientSecret, "reference", tx.getReference()));
+
+        } catch (Exception ex) {
+            throw new PaymentProcessingException("Failed to create Stripe payment intent", ex);
         }
+    }
+
+    @PostMapping("/stripe/transfer")
+    @Transactional
+    public ResponseEntity<?> stripeTransfer(
+            @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (!isAuthorized(apiKey))
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
+
+        Long amount = ((Number) body.get("amount")).longValue();
+        String currency = validateCurrency((String) body.getOrDefault("currency", "USD"));
+        String connectedAcct = (String) body.get("connectedAccountId");
 
         try {
-            Long amount = req.amount();
-            String currency = "usd";
-            String clientSecret = stripeService.createPaymentIntent(amount, currency);
-
+            String transferId = stripeService.sendTransfer(amount, currency, connectedAcct);
             PaymentTransaction tx = new PaymentTransaction();
             tx.setProvider("stripe");
             tx.setAmount(amount);
             tx.setCurrency(currency);
-            tx.setStatus("CREATED");
-            tx.setReference(StringUtils.hasText(req.reference()) ? req.reference() : "stripe-" + UUID.randomUUID());
-            tx.setCreatedAt(Instant.now());
-            tx.setClientSecret(clientSecret);
+            tx.setReference("transfer-" + UUID.randomUUID());
+            tx.updatePaymentResponse("stripe", "TRANSFER_SUCCESS", transferId, true);
             txRepo.save(tx);
 
-            log.info("Stripe intent created: ref={}, amount={}", tx.getReference(), amount);
-            return ResponseEntity.ok(Map.of("clientSecret", clientSecret, "reference", tx.getReference()));
-
-        } catch (Exception e) {
-            log.error("Stripe intent error: {}", e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Failed to create payment intent"));
+            return ResponseEntity.ok(Map.of("transferId", transferId, "reference", tx.getReference()));
+        } catch (Exception ex) {
+            throw new PaymentProcessingException("Stripe transfer failed", ex);
         }
     }
 
-    /* ---------- MTN Collection ---------- */
+    @PostMapping("/stripe/payout")
+    @Transactional
+    public ResponseEntity<?> stripePayout(
+            @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
+            @RequestBody Map<String, Object> body
+    ) {
+        if (!isAuthorized(apiKey))
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
+
+        Long amount = ((Number) body.get("amount")).longValue();
+        String currency = validateCurrency((String) body.getOrDefault("currency", "USD"));
+
+        try {
+            String payoutId = stripeService.createPayout(amount, currency);
+            PaymentTransaction tx = new PaymentTransaction();
+            tx.setProvider("stripe");
+            tx.setAmount(amount);
+            tx.setCurrency(currency);
+            tx.setReference("payout-" + UUID.randomUUID());
+            tx.updatePaymentResponse("stripe", "PAYOUT_SUCCESS", payoutId, true);
+            txRepo.save(tx);
+
+            return ResponseEntity.ok(Map.of("payoutId", payoutId, "reference", tx.getReference()));
+        } catch (Exception ex) {
+            throw new PaymentProcessingException("Stripe payout failed", ex);
+        }
+    }
+
+    /* ============================================================== 
+       MTN & AIRTEL ENDPOINTS 
+       ============================================================== */
+
     @PostMapping("/mtn/collect")
     @Transactional
     public ResponseEntity<?> mtnCollect(
             @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
             @Valid @RequestBody MomoCollectRequest req
     ) {
-        if (!isAuthorized(apiKey)) {
+        if (!isAuthorized(apiKey))
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
-        }
 
-        if (StringUtils.hasText(req.reference())) {
-            Optional<PaymentTransaction> existing = txRepo.findByReference(req.reference());
-            if (existing.isPresent()) {
-                log.info("MTN collect exists: {}", req.reference());
-                return ResponseEntity.ok(existing.get());
-            }
-        }
+        Optional<PaymentTransaction> existing = findExisting(req.reference());
+        if (existing.isPresent()) return ResponseEntity.ok(existing.get());
 
-        PaymentTransaction tx = new PaymentTransaction();
-        tx.setProvider("mtn");
-        tx.setAmount(req.amount());
-        tx.setCurrency("UGX");
-        tx.setReference(StringUtils.hasText(req.reference()) ? req.reference() : UUID.randomUUID().toString());
-        tx.setStatus("PENDING");
-        tx.setCreatedAt(Instant.now());
-        txRepo.save(tx);
-
+        String currency = validateCurrency(req.currency());
+        PaymentTransaction tx = startTransaction("mtn", req, currency);
         try {
             MtnResponseDTO response = mtnService.initiateCollection(
                     String.valueOf(req.amount()),
                     req.phone(),
                     tx.getReference(),
                     "Payment request",
-                    "Payment to merchant"
+                    "Payment to merchant",
+                    currency
             );
-
-            if (response != null && "SUCCESS".equalsIgnoreCase(response.getBody())) {
-                tx.setStatus("INITIATED");
-            } else {
-                tx.setStatus("FAILED");
-            }
+            boolean success = response != null && "SUCCESS".equalsIgnoreCase(response.getBody());
+            tx.updatePaymentResponse("mtn", response != null ? response.toString() : null, null, success);
             txRepo.save(tx);
 
-            log.info("MTN collect initiated: ref={}, phone={}", tx.getReference(), redactPhone(req.phone()));
+            log.info("MTN collect initiated: ref={}, phone={}, currency={}", tx.getReference(), redactPhone(req.phone()), currency);
             return ResponseEntity.ok(response);
-
-        } catch (Exception e) {
-            tx.setStatus("FAILED");
-            txRepo.save(tx);
-            log.error("MTN collect error: ref={}, {}", tx.getReference(), e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Failed to initiate MTN collection"));
+        } catch (RuntimeException ex) {
+            failTransaction(tx, "Failed to initiate MTN collection", ex);
+            throw new PaymentProcessingException("Failed to initiate MTN collection", ex);
         }
     }
 
-    /* ---------- MTN Withdrawal ---------- */
     @PostMapping("/mtn/withdraw")
     @Transactional
     public ResponseEntity<?> mtnWithdraw(
             @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
             @Valid @RequestBody MomoCollectRequest req
     ) {
-        if (!isAuthorized(apiKey)) {
+        if (!isAuthorized(apiKey))
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
-        }
 
-        if (StringUtils.hasText(req.reference())) {
-            Optional<PaymentTransaction> existing = txRepo.findByReference(req.reference());
-            if (existing.isPresent()) {
-                log.info("MTN withdraw exists: {}", req.reference());
-                return ResponseEntity.ok(existing.get());
-            }
-        }
+        Optional<PaymentTransaction> existing = findExisting(req.reference());
+        if (existing.isPresent()) return ResponseEntity.ok(existing.get());
 
-        PaymentTransaction tx = new PaymentTransaction();
-        tx.setProvider("mtn");
-        tx.setAmount(req.amount());
-        tx.setCurrency("UGX");
-        tx.setReference(StringUtils.hasText(req.reference()) ? req.reference() : UUID.randomUUID().toString());
-        tx.setStatus("PENDING");
-        tx.setCreatedAt(Instant.now());
-        txRepo.save(tx);
-
+        String currency = validateCurrency(req.currency());
+        PaymentTransaction tx = startTransaction("mtn", req, currency);
         try {
-            MtnResponseDTO response = mtnService.initiateWithdrawal(
-                    req.phone(),
-                    req.amount(),
-                    tx.getReference()
-            );
-
-            if (response != null && "SUCCESS".equalsIgnoreCase(response.getBody())) {
-                tx.setStatus("INITIATED");
-            } else {
-                tx.setStatus("FAILED");
-            }
+            MtnResponseDTO response = mtnService.initiateWithdrawal(req.phone(), req.amount(), tx.getReference(), currency);
+            boolean success = response != null && "SUCCESS".equalsIgnoreCase(response.getBody());
+            tx.updatePaymentResponse("mtn", response != null ? response.toString() : null, null, success);
             txRepo.save(tx);
 
-            log.info("MTN withdraw initiated: ref={}, phone={}", tx.getReference(), redactPhone(req.phone()));
+            log.info("MTN withdraw initiated: ref={}, phone={}, currency={}", tx.getReference(), redactPhone(req.phone()), currency);
             return ResponseEntity.ok(response);
-
-        } catch (Exception e) {
-            tx.setStatus("FAILED");
-            txRepo.save(tx);
-            log.error("MTN withdraw error: ref={}, {}", tx.getReference(), e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Failed to initiate MTN withdrawal"));
+        } catch (RuntimeException ex) {
+            failTransaction(tx, "Failed to initiate MTN withdrawal", ex);
+            throw new PaymentProcessingException("Failed to initiate MTN withdrawal", ex);
         }
     }
 
-    /* ---------- Airtel Collection ---------- */
     @PostMapping("/airtel/collect")
     @Transactional
     public ResponseEntity<?> airtelCollect(
             @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
             @Valid @RequestBody MomoCollectRequest req
     ) {
-        if (!isAuthorized(apiKey)) {
+        if (!isAuthorized(apiKey))
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
-        }
 
-        if (StringUtils.hasText(req.reference())) {
-            Optional<PaymentTransaction> existing = txRepo.findByReference(req.reference());
-            if (existing.isPresent()) {
-                log.info("Airtel collect exists: {}", req.reference());
-                return ResponseEntity.ok(existing.get());
-            }
-        }
+        Optional<PaymentTransaction> existing = findExisting(req.reference());
+        if (existing.isPresent()) return ResponseEntity.ok(existing.get());
 
-        PaymentTransaction tx = new PaymentTransaction();
-        tx.setProvider("airtel");
-        tx.setAmount(req.amount());
-        tx.setCurrency("UGX");
-        tx.setReference(StringUtils.hasText(req.reference()) ? req.reference() : UUID.randomUUID().toString());
-        tx.setStatus("PENDING");
-        tx.setCreatedAt(Instant.now());
-        txRepo.save(tx);
-
+        String currency = validateCurrency(req.currency());
+        PaymentTransaction tx = startTransaction("airtel", req, currency);
         try {
-            AirtelResponseDTO response = airtelService.initiateCollection(
-                    req.phone(),
-                    req.amount(),
-                    tx.getReference()
-            );
-
-            if (response != null && "SUCCESS".equalsIgnoreCase(response.getBody())) {
-                tx.setStatus("INITIATED");
-            } else {
-                tx.setStatus("FAILED");
-            }
+            AirtelResponseDTO response = airtelService.initiateCollection(req.phone(), req.amount(), tx.getReference(), currency);
+            boolean success = response != null && "SUCCESS".equalsIgnoreCase(response.getBody());
+            tx.updatePaymentResponse("airtel", response != null ? response.toString() : null, null, success);
             txRepo.save(tx);
 
-            log.info("Airtel collect initiated: ref={}, phone={}", tx.getReference(), redactPhone(req.phone()));
+            log.info("Airtel collect initiated: ref={}, phone={}, currency={}", tx.getReference(), redactPhone(req.phone()), currency);
             return ResponseEntity.ok(response);
-
-        } catch (Exception e) {
-            tx.setStatus("FAILED");
-            txRepo.save(tx);
-            log.error("Airtel collect error: ref={}, {}", tx.getReference(), e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Failed to initiate Airtel collection"));
+        } catch (RuntimeException ex) {
+            failTransaction(tx, "Failed to initiate Airtel collection", ex);
+            throw new PaymentProcessingException("Failed to initiate Airtel collection", ex);
         }
     }
 
-    /* ---------- Airtel Withdrawal ---------- */
     @PostMapping("/airtel/withdraw")
     @Transactional
     public ResponseEntity<?> airtelWithdraw(
             @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
             @Valid @RequestBody MomoCollectRequest req
     ) {
-        if (!isAuthorized(apiKey)) {
+        if (!isAuthorized(apiKey))
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "Unauthorized"));
-        }
 
-        if (StringUtils.hasText(req.reference())) {
-            Optional<PaymentTransaction> existing = txRepo.findByReference(req.reference());
-            if (existing.isPresent()) {
-                log.info("Airtel withdraw exists: {}", req.reference());
-                return ResponseEntity.ok(existing.get());
-            }
-        }
+        Optional<PaymentTransaction> existing = findExisting(req.reference());
+        if (existing.isPresent()) return ResponseEntity.ok(existing.get());
 
-        PaymentTransaction tx = new PaymentTransaction();
-        tx.setProvider("airtel");
-        tx.setAmount(req.amount());
-        tx.setCurrency("UGX");
-        tx.setReference(StringUtils.hasText(req.reference()) ? req.reference() : UUID.randomUUID().toString());
-        tx.setStatus("PENDING");
-        tx.setCreatedAt(Instant.now());
-        txRepo.save(tx);
-
+        String currency = validateCurrency(req.currency());
+        PaymentTransaction tx = startTransaction("airtel", req, currency);
         try {
-            AirtelResponseDTO response = airtelService.initiateWithdrawal(
-                    req.phone(),
-                    req.amount(),
-                    tx.getReference()
-            );
-
-            if (response != null && "SUCCESS".equalsIgnoreCase(response.getBody())) {
-                tx.setStatus("INITIATED");
-            } else {
-                tx.setStatus("FAILED");
-            }
+            AirtelResponseDTO response = airtelService.initiateWithdrawal(req.phone(), req.amount(), tx.getReference(), currency);
+            boolean success = response != null && "SUCCESS".equalsIgnoreCase(response.getBody());
+            tx.updatePaymentResponse("airtel", response != null ? response.toString() : null, null, success);
             txRepo.save(tx);
 
-            log.info("Airtel withdraw initiated: ref={}, phone={}", tx.getReference(), redactPhone(req.phone()));
+            log.info("Airtel withdraw initiated: ref={}, phone={}, currency={}", tx.getReference(), redactPhone(req.phone()), currency);
             return ResponseEntity.ok(response);
-
-        } catch (Exception e) {
-            tx.setStatus("FAILED");
-            txRepo.save(tx);
-            log.error("Airtel withdraw error: ref={}, {}", tx.getReference(), e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Failed to initiate Airtel withdrawal"));
+        } catch (RuntimeException ex) {
+            failTransaction(tx, "Failed to initiate Airtel withdrawal", ex);
+            throw new PaymentProcessingException("Failed to initiate Airtel withdrawal", ex);
         }
     }
 }

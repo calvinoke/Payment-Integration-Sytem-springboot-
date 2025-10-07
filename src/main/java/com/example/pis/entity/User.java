@@ -4,6 +4,8 @@ import java.util.Objects;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -28,20 +30,21 @@ public class User {
     private Long id;
 
     /** Unique username used for authentication. */
-    @Column(nullable = false, unique = true, length = 50, columnDefinition = "VARCHAR(50)")
+    @Column(nullable = false, unique = true, length = 50)
     private String username;
 
     /** BCrypt-hashed password. */
-    @Column(nullable = false, length = 255, columnDefinition = "VARCHAR(255)")
+    @Column(nullable = false, length = 255)
     private String password;
 
     /** Email address; must be unique if used for login or communication. */
-    @Column(nullable = false, unique = true, length = 100, columnDefinition = "VARCHAR(100)")
+    @Column(nullable = false, unique = true, length = 100)
     private String email;
 
-    /** User role for Spring Security (e.g., USER, ADMIN). */
-    @Column(nullable = false, length = 20, columnDefinition = "VARCHAR(20) DEFAULT 'USER'")
-    private String role = "USER";   // default
+    /** User role for Spring Security (USER, ADMIN). Defaults to USER. */
+    @Enumerated(EnumType.STRING) // stores enum name in DB as String
+    @Column(nullable = false, length = 20)
+    private Role role = Role.USER;
 
     /* ---------- Constructors ---------- */
 
@@ -49,19 +52,19 @@ public class User {
         // JPA requires a no-arg constructor
     }
 
-    public User(String username, String password, String email, String role) {
+    public User(String username, String password, String email, Role role) {
         this.username = username;
         this.password = password;
         this.email = email;
-        this.role = role;
+        this.role = role != null ? role : Role.USER;
     }
 
-    public User(Long id, String username, String password, String email, String role) {
+    public User(Long id, String username, String password, String email, Role role) {
         this.id = id;
         this.username = username;
         this.password = password;
         this.email = email;
-        this.role = role;
+        this.role = role != null ? role : Role.USER;
     }
 
     /* ---------- Getters & Setters ---------- */
@@ -98,12 +101,12 @@ public class User {
         this.email = email;
     }
 
-    public String getRole() {
+    public Role getRole() {
         return role;
     }
 
-    public void setRole(String role) {
-        this.role = role;
+    public void setRole(Role role) {
+        this.role = role != null ? role : Role.USER;
     }
 
     /* ---------- Utility ---------- */
@@ -114,7 +117,7 @@ public class User {
                "id=" + id +
                ", username='" + username + '\'' +
                ", email='" + email + '\'' +
-               ", role='" + role + '\'' +
+               ", role=" + role +
                '}';
         // Note: Do NOT include the password in logs.
     }

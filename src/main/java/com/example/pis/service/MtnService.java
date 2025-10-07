@@ -90,8 +90,11 @@ public class MtnService {
     }
 
     /** Initiates a collection (payment request) on MTN Mobile Money */
-    public MtnResponseDTO initiateCollection(String amount, String msisdn, String externalId, String payerMessage, String payeeNote) {
+    public MtnResponseDTO initiateCollection(String amount, String msisdn, String externalId, String payerMessage, String payeeNote, String currency) {
         validateRequest(amount, msisdn, externalId);
+
+        if (currency == null || currency.isBlank()) currency = "UGX";
+        currency = currency.toUpperCase();
 
         String token = getAccessToken();
         String url = apiUrl + "/requesttopay";
@@ -105,7 +108,7 @@ public class MtnService {
 
         Map<String, Object> body = Map.of(
                 "amount", amount,
-                "currency", "UGX",
+                "currency", currency,
                 "externalId", externalId,
                 "payer", Map.of("partyIdType", "MSISDN", "partyId", msisdn),
                 "payerMessage", payerMessage,
@@ -118,13 +121,16 @@ public class MtnService {
         int status = resp.getStatusCode().value();
         String respBody = Optional.ofNullable(resp.getBody()).orElse("");
 
-        logger.info("MTN collection initiated: {}", externalId);
+        logger.info("MTN collection initiated: {} [{}]", externalId, currency);
         return new MtnResponseDTO(String.valueOf(status), respBody);
     }
 
     /** Initiates a withdrawal (payout) on MTN Mobile Money */
-    public MtnResponseDTO initiateWithdrawal(String msisdn, Long amount, String reference) {
+    public MtnResponseDTO initiateWithdrawal(String msisdn, Long amount, String reference, String currency) {
         validateRequest(amount.toString(), msisdn, reference);
+
+        if (currency == null || currency.isBlank()) currency = "UGX";
+        currency = currency.toUpperCase();
 
         String token = getAccessToken();
         String url = apiUrl + "/disbursement";
@@ -138,7 +144,7 @@ public class MtnService {
 
         Map<String, Object> body = Map.of(
                 "amount", amount.toString(),
-                "currency", "UGX",
+                "currency", currency,
                 "externalId", reference,
                 "payee", Map.of("partyIdType", "MSISDN", "partyId", msisdn)
         );
@@ -149,7 +155,7 @@ public class MtnService {
         int status = resp.getStatusCode().value();
         String respBody = Optional.ofNullable(resp.getBody()).orElse("");
 
-        logger.info("MTN withdrawal initiated: {}", reference);
+        logger.info("MTN withdrawal initiated: {} [{}]", reference, currency);
         return new MtnResponseDTO(String.valueOf(status), respBody);
     }
 

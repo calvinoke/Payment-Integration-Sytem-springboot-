@@ -102,6 +102,39 @@ public class PaymentTransaction {
     public String getAirtelResponse() { return airtelResponse; }
     public void setAirtelResponse(String airtelResponse) { this.airtelResponse = airtelResponse; }
 
+    /* ---------- Payment Update Methods ---------- */
+
+    /**
+     * Updates the transaction with provider response and status.
+     *
+     * @param provider          The payment provider ("mtn", "airtel", "stripe")
+     * @param responseBody      The raw response from the provider
+     * @param providerTxId      Provider-specific transaction ID (if any)
+     * @param success           True if the transaction succeeded, false otherwise
+     */
+    public void updatePaymentResponse(String provider, String responseBody, String providerTxId, boolean success) {
+        if ("mtn".equalsIgnoreCase(provider)) {
+            this.mtnResponse = responseBody;
+        } else if ("airtel".equalsIgnoreCase(provider)) {
+            this.airtelResponse = responseBody;
+        } else if ("stripe".equalsIgnoreCase(provider)) {
+            this.clientSecret = providerTxId; // Use clientSecret as identifier for Stripe
+        }
+
+        this.providerTransactionId = providerTxId;
+        this.status = success ? "SUCCESS" : "FAILED";
+    }
+
+    /** Marks transaction as initiated */
+    public void markInitiated() {
+        this.status = "INITIATED";
+    }
+
+    /** Marks transaction as failed */
+    public void markFailed() {
+        this.status = "FAILED";
+    }
+
     /* ---------- Utility ---------- */
     @Override
     public String toString() {

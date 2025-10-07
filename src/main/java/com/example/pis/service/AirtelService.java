@@ -84,22 +84,25 @@ public class AirtelService {
     }
 
     /** Initiates a collection (payment) request */
-    public AirtelResponseDTO initiateCollection(String phone, Long amount, String reference) {
+    public AirtelResponseDTO initiateCollection(String phone, Long amount, String reference, String currency) {
         validateRequest(phone, amount, reference);
+
+        if (currency == null || currency.isBlank()) currency = "UGX";
+        currency = currency.toUpperCase();
 
         String token = getToken();
         String url = apiUrl + "/collection/v1_0/requesttopay";
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
-        headers.set("X-Callback-Url", "https://your-domain.com/webhooks/airtel");
+        headers.set("X-Callback-Url", "https://your-domain.com/api/webhooks/airtel");
         headers.set("X-Reference-Id", UUID.randomUUID().toString());
         headers.set("Ocp-Apim-Subscription-Key", apiKey);
         headers.setContentType(MediaType.APPLICATION_JSON);
 
         Map<String, Object> body = Map.of(
                 "amount", amount.toString(),
-                "currency", "UGX",
+                "currency", currency,
                 "externalId", reference,
                 "payer", Map.of("partyIdType", "MSISDN", "partyId", phone)
         );
@@ -110,27 +113,30 @@ public class AirtelService {
         int status = resp.getStatusCode().value();
         String respBody = Optional.ofNullable(resp.getBody()).orElse("");
 
-        logger.info("Airtel collection initiated: {}", reference);
+        logger.info("Airtel collection initiated: {} [{}]", reference, currency);
         return new AirtelResponseDTO(String.valueOf(status), respBody);
     }
 
     /** Initiates a withdrawal (disbursement) request */
-    public AirtelResponseDTO initiateWithdrawal(String phone, Long amount, String reference) {
+    public AirtelResponseDTO initiateWithdrawal(String phone, Long amount, String reference, String currency) {
         validateRequest(phone, amount, reference);
+
+        if (currency == null || currency.isBlank()) currency = "UGX";
+        currency = currency.toUpperCase();
 
         String token = getToken();
         String url = apiUrl + "/disbursement/v1_0/transfer";
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token);
-        headers.set("X-Callback-Url", "https://your-domain.com/webhooks/airtel");
+        headers.set("X-Callback-Url", "https://your-domain.com/api/webhooks/airtel");
         headers.set("X-Reference-Id", UUID.randomUUID().toString());
         headers.set("Ocp-Apim-Subscription-Key", apiKey);
         headers.setContentType(MediaType.APPLICATION_JSON);
 
         Map<String, Object> body = Map.of(
                 "amount", amount.toString(),
-                "currency", "UGX",
+                "currency", currency,
                 "externalId", reference,
                 "payee", Map.of("partyIdType", "MSISDN", "partyId", phone)
         );
@@ -141,7 +147,7 @@ public class AirtelService {
         int status = resp.getStatusCode().value();
         String respBody = Optional.ofNullable(resp.getBody()).orElse("");
 
-        logger.info("Airtel withdrawal initiated: {}", reference);
+        logger.info("Airtel withdrawal initiated: {} [{}]", reference, currency);
         return new AirtelResponseDTO(String.valueOf(status), respBody);
     }
 
